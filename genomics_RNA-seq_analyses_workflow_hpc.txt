@@ -1,0 +1,347 @@
+## 28/07/2023
+## Lucie Ruzickova - notes and code
+## RNA-Seq analysis pipeline (from raw reads to counts, steps 1) to 3))
+## https://hbctraining.github.io/DGE_workshop_salmon_online/lessons/01a_RNAseq_processing_workflow.html
+## overview: 
+## 1) biological sample/library preparation (cDNA library, quality check for mRNA and enrichment)
+##		reverse transcription to cDNA and amplify by PCR (qPCR), agilent bioanalyzer, tape station to check for length, purity etc.
+##		number of replicates - the more the better (biological replicates), technical replicates are not worthwhile with NGS
+## 		more biol. replicates also better than increasing sequencing depth
+## 		avoiding confounding effects (uncontrolled variables) and reducing batch effects (different preparation date, time, person, device, reagents etc.)
+##		pooling samples randomly, have about 30 mil. SE reads per sample (stranded), also for isoforms - ENCODE, 15 mil. reads per sample sufficient if more than 3 replicates
+##		read length longer than 50 bp without primer
+## 		isoforms - paired-end 30 mil. bp, novel more than 60 mil. bp, more biol. replicated, the longer read the better, careful QC analysis
+## 2) sequencing - getting a FASTQ, alligning to reference transcriptome assembly that is indexed
+##		sequence by Illumina (paired-end or single-end reads (SSR files - check if separated or together with paired-end data)
+##		Illumina clusters roughlyl correspond to reads
+##		fastQC reads
+##		fragmentation and size selection (generally longer than 50 bp for optimal allignment without primers
+##		primers can be trimmed but do not have to depending on the quality and interference, fastq report	
+## 3) using fastq: fastQC, STAR/Qualimap, possibly use bowtie2
+## OR 3) Quantify expression with Salmon, Kallisto, Sailfish
+## 4) DGE and functional analysis in R (Bioconductor, functional analysis etc): 
+## count matrix generated using tximport and pseudocounts (MultiQC)
+#####################################################
+## HPC environment
+# dependng on preference and size of environment:
+# classic queue system (user - login node - compupte nodes - file server - shared disks, users submit jobs via a queue system)
+# computing can be run on different nodes in a parallel manner (depending on availability of CPUs)
+# jobs subitted usually via bash, in a "compute mode" using a job submission script
+
+# ex. Harvard, bowtie2
+#! /bin/sh #or bin/bash or anything else depending on server setup
+#SBATCH -p short #partition, different "queue type", depends on priority, run time, cores used etc.
+#SBATCH –t 0-03:00 #aim for 125% over (you don't want the job to be cancelled right before it is finished)
+#SBATCH –c 4 #number of cores/threads, match with what is used in script - the partition and server provider should have that suggested
+#SBATCH --mem=8G # how big in terms of memory is the input/intermediate logs (usully deleted after steps) and output
+#SBATCH –o %j.out
+#SBATCH –e %j.err
+#SBATCH -J bowtie2_run1 #job name
+#SBATCH —mail-type=ALL #notify about job completion or errors
+#SBATCH –-mail-user=mfk8@med.harvard.edu
+module load gcc/6.2.0
+module load bowtie2/2.2.9
+bowtie -c 4 hg19 file1_1.fq
+# can be monitored
+
+# if the environment not that big: can be done via the command line only and R analysis in R studio or still the command line
+
+# sample project should have raw data, metadata, scripts, results, logs (intermediate files, specific parameters used, but also to have a 
+# record of any standard output that is generated while running the command.), 
+# software used and versions, what tools are best for the data you are working with, keep up with the literature and make sure you are using the most up-to-date versions, record information on parameters used and summary statistics
+# Have a README file for that
+####################################################
+# downloading from publically available databases - GEO, SRA, Ensembl latest genome assembly
+wget ftp://igenome:G3nom3s4u@ussd-ftp.illumina.com/Homo_sapiens/NCBI/GRCh38/Homo_sapiens_NCBI_GRCh38.tar.gz
+tar -xzf Homo_sapiens_NCBI_GRCh38.tar.gz
+# worm
+wget ftp://ftp.ebi.ac.uk/pub/databases/wormbase/parasite/releases/WBPS10/species/acanthocheilonema_viteae/PRJEB4306/acanthocheilonema_viteae.PRJEB4306.WBPS10.genomic.fa.gz
+# GEO
+wget --recursive --no-parent -nd ftp://ftp.ncbi.nlm.nih.gov/geo/series/GSE50nnn/GSE50499/suppl/
+wget -r -np -nd -R "index.html*" ftp://ftp.ncbi.nlm.nih.gov/geo/series/GSE50nnn/GSE50499/suppl/
+# all data
+tar -xvf GSE111889_RAW.tar 
+for all in *.gz; do gunzip $all; done
+curl -O ftp://ftp.ncbi.nlm.nih.gov/geo/series/GSE50nnn/GSE50499/suppl/GSE50499_GEO_Ceman_counts.txt.gz
+# from SRA - study, sample, experiment, run
+####################################################
+module load /project/soft/linux64/anaconda
+
+## simplified workflow in MDA group: 
+### 1) Fastqc 
+# For single file 
+fastqc -t 12 file_name
+# To batch multiple files 
+fastqc -t 12 *.fastq
+
+### 2) Trim reads (optional)
+#run fastp 
+module load fastp
+fastp –i PEO_1.R1.fq.gz -I PEO_1.R2.fq.gz -o PEO_1_trimmed.R1.fq.gz –O PEO_1_trimmed.R2.fq.gz --detect_adapter_for_pe -l 20 -j output.R1.fastp.json -output.fastp.html
+
+### 3) Align to genome with splice aware algorithm (e.g. STAR or bowtie2) - important for G4s
+## index and download reference genome # bowtie2
+module load bowtie2
+bowtie2-build /$explicit_root_path/Homo_sapiens.GRCh38.dna.primary_assembly.fa hg38 # did not form 1 file for me
+## bowtie2 allignment of reads
+module load bowtie2
+bowtie2 -a -L 5 -x /$explicit_root_path/hg38 -c ggagctgccatgtccgg -S test_new.sam  # -a load all alignments 
+# -L length of seed substring
+# -x reference genome 
+# -c sequence 
+# -S sam file name 
+for file in $PBS_O_WORDIR/*.fastq
+do 
+name=`basename $file .trimmed.fastq` 
+bowtie2 -x /rds/general/user/jr2715/home/mda_training/aligning/hg38 -U $file -S $name.sam  2> summary_$file.txt
+done
+
+# STAR
+# ex. Gem, STAR
+# Build genome with correct overhang
+# (this depends on the sequence fragment size -1, in this case 99)
+# PBS -lwalltime=08:00:00 #time of job
+# PBS -lselect=1:ncpus=10:mem=900gb #select, cpu no., memory
+# first index the assemblz genome (make gtf)
+module load star 
+STAR --runThreadN 12 --runMode genomeGenerate --genomeDir /$explicit_root_path/star99 --genomeFastaFiles 
+/$explicit_root_path/genomes/hg38_ucsc/hg38.fa --sjdbGTFfile /$explicit_root_path/genomes/hg38_ucsc/hg38.refGene.gtf --sjdbOverhang 99
+cp * $PBS_O_WORKDIR #copy back to working directory from server
+# Align to built genome 
+# PBS -lwalltime=08:00:00 #time of job
+# PBS -lselect=1:ncpus=250:mem=900gb #select, cpu no., memory
+# then apply that to samples using the star algorithm in a for loop (quicker)
+module load star
+for name in PEO1_1 PEO1_2 PEO1_3
+do
+STAR --runThreadN 12 \
+--genomeDir /$explicit_root_path/star99 \
+--sjdbGTFfile /$explicit_root_path/genomes/hg38_ucsc/hg38.refGene.gtf \
+--sjdbOverhang 99 \
+--outFileNamePrefix $name \
+--readFilesCommand gunzip -c \
+--readFilesIn /$explicit_root_path/PEO1/trimmed_$name.R1.fastq.gz /$explicit_root_path/PEO1/trimmed_$name.R2.fastq.gz \
+--outSAMtype BAM SortedByCoordinate
+done
+cp * $PBS_O_WORKDIR #copy back to working directory
+#index bam files 
+module load samtools 
+samtools index file_name.bam 
+
+### 4) Differential analysis with DESeq2  (Gem's code)
+# make feature count table 
+nice R 
+# To install Rsubread on R versions older than 4.3
+> if (!require("BiocManager", quietly = TRUE))
++     install.packages("BiocManager")
+> BiocManager::install("Rsubread")
+# Conduct feature count, all .bam and .bai files of both conditions must be in same file (e.g PEO1 AND PEO4 in same one)
+# Done on terminal in job submission as could not load Rsubread
+#PBS -lwalltime=08:00:00
+#PBS -lselect=1:ncpus=100:mem=900gb
+module load subread
+featureCounts -T 3 -a $PBS_O_WORKDIR/hg38.refGene.gtf -o PEO1_4_FC.txt $PBS_O_WORKDIR/*.bam
+cp * $PBS_O_WORKDIR
+# txt file then must be reformatted ready for use 
+# convert txt into csv file from previous step
+# these steps to be done in r studio
+# import fc into R
+fc_PEO_RNA <- read.csv("PEO1_4_FC.csv") 
+# add geneID as row name
+samp2 <- fc_PEO_RNA[,-1] 
+rownames(samp2) <- fc_PEO_RNA[,1]
+# remove any na values
+samp2[is.na(samp2)] <- 0
+# now ready to move onto deseq2
+BiocManager::install("DESeq2")
+library(DESeq2)
+# make deseq2 dataset (dds)
+samp2 <- read.delim("fc_PEO_RNA.txt", header = TRUE, sep = "\t")
+condition <- c("PEO1", "PEO1", "PEO1", "PEO4", "PEO4", "PEO4")
+dds <- DESeqDataSetFromMatrix(countData=samp2, colData=DataFrame(condition), design=~condition)
+# gives details on how many rows and columns
+dds
+# remove rows that have <10 counts - this reduces memory size of dds and increases deseq speed
+dds <- dds[rowSums(counts(dds))>=10,]
+# conduct differential analysis
+dds <- DESeq(dds)
+res <- results(dds)
+res
+# get the name of the comparisons made aka coefficients
+resultsNames(dds) 
+# Shrink fold change - coef = name from above step 
+res.shr <- lfcShrink(dds,coef="condition_PEO4_vs_PEO1")
+# Remove rows with missing adj p value
+resFix <- res.shr[!is.na(res.shr$padj),]
+# Export data 
+write.csv(as.data.frame(resFix), file="geneID_RNA_PEO1_v_PEO4.csv")
+######################################
+
+## Harvard workflow and course:
+# sample fastq file:
+#@HWI-ST330:304:H045HADXX:1:1101:1111:61397
+#CACTTGTAAGGGCAGGCCCCCTTCACCCTCCCGCTCCTGGGGGANNNNNNNNNNANNNCGAGGCCCTGGGGTAGAGGGNNNNNNNNNNNNNNGATCTTGG
+#+
+#@?@DDDDDDHHH?GH:?FCBGGB@C?DBEGIIIIAEF;FCGGI#########################################################
+# Phred 33 quality scores at the 4th line, 3rd line is strand, 1st is sample, 2nd are nucleotides
+# Q score - Q = -10 x log10(P), where P is the probability that a base call is erroneous, Q 30 = 1 in 1000, acceptable baseline (above 25 or 30 depending on experiment)
+module load fastqc
+fastqc *.fq
+# fastqc --help
+# generates a summary report of statistics including: 
+# basic stats, per base seq quality (lower towards ends, trimmable), per tile seq quality, per seq quality scores - increases towards end - good, 
+# per base seq content - can jump up and down but should be steady (jumping suggests contamination BUT in RNA-Seq this is normal), per seq GC content (possible contamination), per base N content,
+# seq length distribution, sequence duplication levels (more PCR cycles, more risks of duplication), overrepresented seqs (contamination), adapter content (requires trimming), Kmer content
+# worrisome - overclustering, instrument breakdown 
+
+#### ALLIGNMENT TOOLS AND THEORY
+# genome mapping pipeline: usually use STAR, HISAT2, bowtie2 (spile-aware things), 
+# then using htseq-count or featureCouns for genome counting or stringtie for transcript discovery and counting, homology-based blast2go for novel transcript anotation
+# transcript mapping: Reads, RSEM, Kallisto, Sailfish, Salmon, transcript mapping and quantification
+# assembly - reads (trinity and sculpture -> assembly into transcripts, then trinotate for novel transcript annotation)
+## Transcript mapping - string matching (not that simple) - short reads, distinguish variants and sequencing errors, massive number, small insert size
+
+# INDEX REFERENCE
+# indexing a reference sequence - efficient way of searching, it can be queried any number of times (needed to be done only once! unless there is a better assembly released...)
+# downloadable from Ensembl 
+# indexing methods - Kallisto (hash-based), STAR and Salmon (suffix arrays), BWA and Bowtie2 (Burrows-Wheeler Transform)
+# hash-based early - pick k-mer size, build lookup of every k-mer in reference map, break query into k-mers, seed and extend strategy, 100% match the query k-mer to reference, 0.1-1 sec per query, not feasible for NGS
+# now - allow mismatches, use multiple seeds, slower and memory intensive
+# suffix arrays - sorted table of suffixes (substrings of a string), all suffixes are sorted, large amount of memory required
+# B-W transform - compressed suffix arrays, same characters together rather than sort alphabetically (Bowtie, SOAP2, BWA-MEM, diminished efficiency of string search operations, less memory needed)
+# !!!!gtf = annotation file of a genome assembly must match the genome or transcriptome fasta file - same build and source!!!!
+# SALMON - Fasta file of all transcripts of organism as reference, indexing by suffix array and hash table, outputs abundance estimates
+# lightweight, quasialligner, faster and more efficient, improved accuracy for transcript-level quantification
+## Quality control
+# reads aligning, uniquely mapped, properly paired PE reads, genomic origin of reads, quality or RNA, transcript coverage etc. 
+# by RNA-SeQC or Qualimap (input are bam/sam files and output is an html report file)
+# sam file - mapping info, coordinates of alignment and strands, mismatches, quality of mapping (bam - binary version of sam)]
+# gotten after alignment to genome fasta (guided with gtf - genome annotation file)
+# Splice-aware alignment tools: HISAT2, STAR, MapSplice, SOAPSplice, Passion, SpliceMap, RUM, ABMapper, CRAC, GSNAP, HMMSplicer, Olego, BLAT
+# non-splice aware, you will lose isoform information: Bowtie2, BWA, Novoalign (not free), SOAPaligner, but are good for aligning directly to genes
+
+## SALMON: https://salmon.readthedocs.io/en/latest/salmon.html#using-salmon
+# requires a reference index
+# Salmon would not be the appropriate tool to use if trying to detect novel genes or isoforms, intron retention events, or other methods that require annotations not present in the transcriptome
+# create a transcriptome index:
+wget ftp://ftp.ensembl.org/pub/release-95/fasta/homo_sapiens/cdna/Homo_sapiens.GRCh38.cdna.all.fa.gz
+# Decompress the FASTA file
+ gzip -d Homo_sapiens.GRCh38.cdna.all.fa.gz # decompress gz files by gzip -d file.gz
+module load salmon
+salmon index \
+-t /$explicit_root_path/Homo_sapiens.GRCh38.cdna.all.fa \ # path to transcriptome to be indexed in fasta format
+-i salmon_index \ # path to the folder to store indices generated
+#--type quasi
+-k 31 # default, length of k mer used to create indices
+# gene expression in files
+salmon quant -i transcripts_index -l A -- validateMappings -1 / project / data /ono/
+Tutorial / data / DP_B_Het_R1_S1_L001_R1_001 . fastq .gz -2 / project / data / ono/ Tutorial /
+data / DP_B_Het_R1_S1_L001_R2_001 . fastq .gz -o DP_B_Het_R1
+salmon quant -i /$explicit_root_path/salmon.ensembl38.idx.09-06-2019 \ # specify the location of the index directory
+   -l A \ # Format string describing the library. A will automatically infer the most likely library type 
+ 	-r ~/rnaseq/raw_data/Mov10_oe_1.subset.fq \ # sample file (path relative to index)
+ 	-o Mov10_oe_1.subset.salmon \ # output quantification file name
+ 	--useVBOpt \ # use variational Bayesian EM algorithm rather than the ‘standard EM’ to optimize abundance estimates (more accurate)
+  --seqBias \ #will enable it to learn and correct for sequence-specific biases in the input data
+  --validateMappings # developed for finding and scoring the potential mapping loci of a read by performing base-by-base
+                     # alignment of the reads to the potential loci, scoring the loci, and removing loci falling below a 
+					 # threshold score. This option improves the sensitivity and specificity of the mapping
+# salmon output is a quant.sf file: each row corresponds to a transcript, listed by Ensembl ID, and the columns correspond to metrics for each transcript
+# uses transcripts per milion to quantify
+# estimated number of reads, which is the estimate of the number of reads drawn from this transcript given the transcript’s relative abundance and length)
+
+# running in Salmon in a loop sample script
+vim salmon_all_samples.sbatch
+#!/bin/bash
+#SBATCH -p short 
+#SBATCH -c 6 
+#SBATCH -t 0-12:00 
+#SBATCH --mem 8G 
+#SBATCH --job-name salmon_in_serial 
+#SBATCH -o %j.out 
+#SBATCH -e %j.err
+#SBATCH --reservation=HBC
+cd ~/rnaseq/results/salmon
+for fq in ~/rnaseq/raw_data/*.fq
+do
+# create a prefix
+base=`basename $fq .fq`
+# run salmon
+salmon quant -i /n/groups/hbctraining/rna-seq_2019_02/reference_data/salmon.ensembl38.idx.09-06-2019 \
+ -l A \
+ -r $fq \
+ -p 6 \
+ -o $base.salmon \
+ --seqBias \
+ --useVBOpt \
+ --numBootstraps 30 \
+ --validateMappings
+done
+# run
+sbatch salmon_all_samples.sbatch #only on job submission servers
+# --numBootstraps: specifies computation of bootstrapped abundance estimates. Bootstraps are required for isoform level differential expression analysis for estimation of technical variance.
+
+## STAR (both HBC and MDA)
+# 2 steps - create a genome index (gtf) and map reads to it
+# Build genome with correct overhang
+# (this depends on the sequence fragment size -1, in this case 99)
+module load star 
+STAR --runThreadN 12 --runMode genomeGenerate --genomeDir /$explicit_root_path/star99 --genomeFastaFiles 
+/$explicit_root_path/genomes/hg38_ucsc/hg38.fa --sjdbGTFfile /$explicit_root_path/genomes/hg38_ucsc/hg38.refGene.gtf --sjdbOverhang 99
+cp * $PBS_O_WORKDIR #copy back to working directory from server
+# Align to built genome 
+# PBS -lwalltime=08:00:00 #time of job
+# PBS -lselect=1:ncpus=250:mem=900gb #select, cpu no., memory
+# then apply that to samples using the star algorithm in a for loop (quicker)
+module load star
+for name in PEO1_1 PEO1_2 PEO1_3
+do
+STAR --runThreadN 12 \ # no of threads
+# --runMode # genomeGenerate mode
+--genomeDir /$explicit_root_path/star99 \ # path to store the genome indices
+--sjdbGTFfile /$explicit_root_path/genomes/hg38_ucsc/hg38.refGene.gtf \ # path to genome assembly gtf file (could also be fasta)
+--sjdbOverhang 99 \ # readlength minus one base
+--outFileNamePrefix $name \ # prefix all output files
+--readFilesCommand gunzip -c \
+--readFilesIn /$explicit_root_path/PEO1/trimmed_$name.R1.fastq.gz /$explicit_root_path/PEO1/trimmed_$name.R2.fastq.gz \ # path to fastq files 
+--outSAMtype BAM SortedByCoordinate # output file - sam by default
+# --outSAMunmapped # what to do with unmapped reads
+done
+# for each fastq, 5 output files: 
+# Log.final.out - a summary of mapping statistics for the sample -  reads that 1) mapped uniquely, 2) reads that mapped to mutliple locations and 3) reads that are unmapped
+# Aligned.sortedByCoord.out.bam - the aligned reads, sorted by coordinate, in BAM format
+# Log.out - a running log from STAR, with information about the run
+# Log.progress.out - job progress with the number of processed reads, % of mapped reads etc., updated every ~1 minute
+# SJ.out.tab - high confidence collapsed splice junctions in tab-delimited format. Only junctions supported by uniquely mapping reads are reported
+cp * $PBS_O_WORKDIR #copy back to working directory
+
+#index bam files 
+module load samtools 
+samtools index file_name.bam 
+
+# STAR vs SALMON https://ucdavis-bioinformatics-training.github.io/2020-mRNA_Seq_Workshop/data_analysis/compare_star_salmon_mm
+
+## QUALIMAP - Java, HTML QC report (should follow STAR, could be added to MDA pipeline)
+unset DISPLAY # do not open GUI to run Qualimap
+qualimap rnaseq --help
+# documantation: http://qualimap.conesalab.org/
+qualimap rnaseq \
+-outdir results/qualimap/Mov10_oe_1 \ # output directory for html
+-a proportional \ # Counting algorithm - uniquely-mapped-reads(default) or proportional (each multi-mapped read is weighted according to the number of mapped locations)
+-bam results/STAR/Mov10_oe_1_Aligned.sortedByCoord.out.bam \ #path/to/bam/file(s)
+-p strand-specific-reverse \ #Sequencing library protocol - strand-specific-forward, strand-specific-reverse or non-strand-specific (default)
+-gtf /n/groups/hbctraining/intro_rnaseq_hpc/reference_data_ensembl38/Homo_sapiens.GRCh38.92.1.gtf \ # path to gtf
+--java-mem-size=8G
+# The percentage of mapped reads is a global indicator of the overall sequencing accuracy. We expect between 70-90% of reads to be mapped for the human genome.
+# Expect a small fraction of reads to be mapping equally well to multiple regions in the genome (‘multi-mapping reads’).
+# The count related metrics are not as relevant to us since we have quantified with Salmon at the transcript level.
+# Genomic origin data
+# Transcript coverage profile
+# Junction analysis
+# https://hbctraining.github.io/Intro-to-rnaseq-hpc-salmon/lessons/03_QC_STAR_and_Qualimap_run.html
+
+## WORKFLOW AUTOMATION
+# https://hbctraining.github.io/Intro-to-rnaseq-hpc-salmon/lessons/06_automating_workflow.html
+# documenting steps with multiQC: https://hbctraining.github.io/Intro-to-rnaseq-hpc-salmon/lessons/05_multiQC.html
+# troubleshooting: https://hbctraining.github.io/Intro-to-rnaseq-hpc-salmon/lectures/RNA-seq_troubleshooting.pdf
+
