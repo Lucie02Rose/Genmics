@@ -1,1 +1,1 @@
-# Genmics
+# Genomics
